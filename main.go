@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
+	"os"
 	"regexp"
 	"strconv"
-	"strings"
 )
 
 type NodeType string
@@ -170,38 +171,131 @@ func As(outType NodeType, parser Parser) Parser {
 	}
 }
 
-func Eval(node *Node) float64 {
+/////////////////////////// TEST SECTION //////////////////////////////////////
+
+func Eval(node *Node, memory Memory) float64 {
 	switch node.Type {
 	case "Expression":
-		return Eval(node.Children[0])
+		return Eval(node.Children[0], memory)
 	case "Sum":
-		number := Eval(node.Children[0])
+		number := Eval(node.Children[0], memory)
 		for _, sum := range node.Children[1].Children {
 			if sum.Children[0].Type == "OpAdd" {
-				number += Eval(sum.Children[1])
+				number += Eval(sum.Children[1], memory)
 			} else {
-				number -= Eval(sum.Children[1])
+				number -= Eval(sum.Children[1], memory)
 			}
 		}
 		return number
 	case "Multiplication":
-		number := Eval(node.Children[0])
+		number := Eval(node.Children[0], memory)
 		for _, mult := range node.Children[1].Children {
 			if mult.Children[0].Type == "OpMult" {
-				number *= Eval(mult.Children[1])
+				number *= Eval(mult.Children[1], memory)
 			} else {
-				number /= Eval(mult.Children[1])
+				number /= Eval(mult.Children[1], memory)
 			}
 		}
 		return number
 	case "Unit":
-		return Eval(node.Children[1])
+		return Eval(node.Children[1], memory)
 	case "Number":
 		number, _ := strconv.ParseFloat(node.Value, 64)
 		return number
+	case "Variable":
+		return memory.Variables[node.Value]
+	case "FunctionCall":
+		function := memory.Functions[node.Children[0].Value]
+		arguments := []float64{}
+		for _, argument := range node.Children[2].Children {
+			arguments = append(arguments, Eval(argument.Children[0], memory))
+		}
+		variableCopy := make(map[string]float64)
+		for name, value := range memory.Variables {
+			variableCopy[name] = value
+		}
+		for i, argument := range arguments {
+			if i < len(function.Parameters) {
+				variableCopy[function.Parameters[i]] = argument
+			}
+		}
+		scopeMemory := Memory{variableCopy, memory.Functions}
+		return Eval(function.Expression, scopeMemory)
 	default:
 		return 0
 	}
+}
+
+type Memory struct {
+	Variables map[string]float64
+	Functions map[string]MemoryFunction
+}
+
+type MemoryFunction struct {
+	Parameters []string
+	Expression *Node
+}
+
+func Exec(program *Node) {
+	memory := Memory{make(map[string]float64), make(map[string]MemoryFunction)}
+	for _, node := range program.Children {
+		line := node.Children[0]
+		switch line.Type {
+		case "VariableDeclaration":
+			memory.Variables[line.Children[0].Value] = Eval(line.Children[2], memory)
+			fmt.Println(line.Children[0].Value, "=", memory.Variables[line.Children[0].Value])
+			break
+		case "Expression":
+			fmt.Println(Eval(line, memory))
+			break
+		case "FunctionDeclaration":
+			parameters := []string{}
+			for _, parameter := range line.Children[2].Children {
+				parameters = append(parameters, parameter.Children[0].Value)
+			}
+			memory.Functions[line.Children[0].Value] = MemoryFunction {
+				Parameters: parameters,
+				Expression: line.Children[5],
+			}
+			break
+		}
+	}
+}
+
+func Program(input string) (node *Node, rest string, ok bool) {
+	return Some("Lines", 
+		ThenSkipping("Line", WS,
+			Or(
+				Declaration,
+				Expression),
+			LineDelim))(input)
+}
+
+func Declaration(input string) (node *Node, rest string, ok bool) {
+	return Or(
+		VariableDeclaration,
+		FunctionDeclaration,
+	)(input)
+}
+
+func VariableDeclaration(input string) (node *Node, rest string, ok bool) {
+	return ThenSkipping("VariableDeclaration", WS,
+		Variable,
+		Character('='),
+		Expression)(input)
+}
+
+func FunctionDeclaration(input string) (node *Node, rest string, ok bool) {
+	return ThenSkipping("FunctionDeclaration", WS,
+		Variable,
+		Character('('),
+		Some("Parameters", ThenSkipping("Parameter", WS,
+			Variable,
+			ArguementDelimeter,
+			)),
+		Character(')'),
+		Character('='),
+		Expression)(input)
 }
 
 func Expression(input string) (node *Node, rest string, ok bool) {
@@ -234,19 +328,37 @@ func Unit(input string) (node *Node, rest string, ok bool) {
 			Character('('),
 			Expression,
 			Character(')')),
+		Skipping(WS, FunctionCall),
+		Skipping(WS, Variable),
 		Skipping(WS, Number))(input)
 }
 
+func FunctionCall(input string) (node *Node, rest string, ok bool) {
+	return ThenSkipping("FunctionCall", WS,
+		Variable,
+		Character('('),
+		Some("Arguments", ThenSkipping("Argument", WS,
+			Expression,
+			ArguementDelimeter,
+			)),
+		Character(')'))(input)
+}
+
 var Number = Regex("Number", regexp.MustCompile("-?[0-9]+"))
-var Name = Regex("Number", regexp.MustCompile(`\w*`))
-var WS = Regex(Whitespace, regexp.MustCompile(`\s*`))
+var Variable = Regex("Variable", regexp.MustCompile(`[a-zA-Z][a-zA-Z0-9]*`))
+var ArguementDelimeter = Regex("ArgumentDelimeter", regexp.MustCompile(`,?`))
+var WS = Regex(Whitespace, regexp.MustCompile(` *`))
+var LineDelim = Regex(Whitespace, regexp.MustCompile(`[\n;]*`))
 
 func main() {
-	node, rest, ok := Expression(strings.Repeat("-1*(3*1+2)*11-(12342345+234/2243)/10000-(21)*-1282734*550 /42354345 /2342312394823744", 10000))
-	fmt.Println(ok)
+	input, _ := ioutil.ReadAll(os.Stdin)
+	node, rest, ok := Program(string(input))
 	if ok { 
-		fmt.Println(rest)
-		fmt.Println(node)
-		fmt.Println(Eval(node))
+		fmt.Println("Unprocessed:", "\"" + rest + "\"")
+		fmt.Println("Ast:", node)
+		fmt.Println("---------------- OUTPUT -------------")
+		Exec(node)
+	} else {
+		fmt.Println("Parser Failed")
 	}
 }
